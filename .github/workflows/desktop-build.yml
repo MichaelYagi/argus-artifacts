@@ -1,0 +1,176 @@
+name: Build desktop app
+
+# Builds the unsigned Windows 10/11 .exe and macOS Apple Silicon and Intel
+# .apps for a tag of the public MichaelYagi/argus repo, and keeps them as
+# artifacts of *this* private repo -- artifacts of a public repo are
+# downloadable by any signed-in GitHub user, these aren't.
+#
+# Triggered two ways:
+#   - automatically: argus's notify-desktop.yml sends a repository_dispatch
+#     (event "public-tag") when a vX.Y.Z tag is pushed there
+#   - by hand: Actions -> Build desktop app -> Run workflow, typing a tag,
+#     or: gh workflow run desktop-build.yml -R MichaelYagi/argus-artifacts -f tag=v0.2.0
+#
+# Secrets (this repo):
+#   PUBLIC_REPO_READ_TOKEN -- only if argus is ever made private: a
+#     fine-grained PAT with "Contents: Read" on that one repo. While argus
+#     is public this can be omitted; checkout falls back to the workflow's
+#     own token which can read any public repo.
+on:
+  repository_dispatch:
+    types: [public-tag]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag of MichaelYagi/argus to build (e.g. v0.2.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the tag looks like vX.Y.Z
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?(-[a-zA-Z0-9._-]+)?$ ]]; then
+            echo "::error::'$TAG' doesn't look like a version tag -- refusing to build"
+            exit 1
+          fi
+          echo "Building $TAG"
+
+  backend-tests:
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: MichaelYagi/argus
+          ref: ${{ env.TAG }}
+          token: ${{ secrets.PUBLIC_REPO_READ_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: PYTHONPATH=. pytest -q
+
+  build-macos:
+    name: macOS ${{ matrix.label }}
+    needs: backend-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: Silicon, runner: macos-15,       arch: arm64  }
+          - { label: Intel,   runner: macos-15-intel, arch: x86_64 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: MichaelYagi/argus
+          ref: ${{ env.TAG }}
+          token: ${{ secrets.PUBLIC_REPO_READ_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Set up .venv
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+          .venv/bin/pip install -r packaging/tray_requirements.txt
+      - name: Build Argus.app
+        run: packaging/build-macos.sh
+      - name: Check the build really is ${{ matrix.arch }}
+        run: |
+          got="$(lipo -archs "dist/Argus.app/Contents/MacOS/Argus")"
+          echo "built architecture: $got"
+          if [[ "$got" != "${{ matrix.arch }}" ]]; then
+            echo "::error::expected ${{ matrix.arch }} but got $got"
+            exit 1
+          fi
+      - name: Add README, LICENSE and third-party notices
+        run: |
+          { echo "Argus $TAG -- macOS (${{ matrix.label }})"; echo; cat packaging/README-macos-artifact.txt; } > dist/README.txt
+          cp LICENSE dist/LICENSE.txt
+          .venv/bin/python packaging/gen_third_party_notices.py dist/THIRD-PARTY-NOTICES.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Argus-macOS-${{ matrix.label }}-${{ env.TAG }}
+          path: dist
+          retention-days: 30
+
+  build-windows:
+    name: Windows 10-11
+    needs: backend-tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: MichaelYagi/argus
+          ref: ${{ env.TAG }}
+          token: ${{ secrets.PUBLIC_REPO_READ_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Set up .venv
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\pip.exe install -r requirements.txt
+          .\.venv\Scripts\pip.exe install -r packaging\tray_requirements.txt
+      - name: Build Argus.exe
+        run: packaging\build-windows.ps1
+      - name: Add README, LICENSE and third-party notices
+        run: |
+          $header = "Argus $env:TAG -- Windows 10/11 (64-bit)`r`n`r`n"
+          ($header + (Get-Content packaging\README-windows-artifact.txt -Raw)) | Set-Content dist\README.txt
+          Copy-Item LICENSE dist\LICENSE.txt
+          .\.venv\Scripts\python.exe packaging\gen_third_party_notices.py dist\THIRD-PARTY-NOTICES.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Argus-Windows-10-11-${{ env.TAG }}
+          path: dist
+          retention-days: 30
+
+  build-linux:
+    name: Linux (x86_64)
+    needs: backend-tests
+    # x86_64 only -- the resulting binary is tied to this runner's glibc version.
+    # No tray on Linux: pystray has no single reliable tray protocol across
+    # desktop environments. This build is a plain CLI binary (same as ./argus
+    # from source, but self-contained).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: MichaelYagi/argus
+          ref: ${{ env.TAG }}
+          token: ${{ secrets.PUBLIC_REPO_READ_TOKEN || github.token }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Set up .venv
+        # No tray_requirements.txt here -- pystray/Pillow are never bundled
+        # in the Linux build (see packaging/argus-linux.spec's own header).
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+      - name: Build argus
+        run: packaging/build-linux.sh
+      - name: Add README, LICENSE and third-party notices
+        run: |
+          { echo "Argus $TAG -- Linux (x86_64)"; echo; cat packaging/README-linux-artifact.txt; } > dist/README.txt
+          cp LICENSE dist/LICENSE.txt
+          .venv/bin/python packaging/gen_third_party_notices.py dist/THIRD-PARTY-NOTICES.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Argus-Linux-x86_64-${{ env.TAG }}
+          path: dist
+          retention-days: 30
