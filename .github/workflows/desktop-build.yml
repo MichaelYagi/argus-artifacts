@@ -174,3 +174,43 @@ jobs:
           name: Argus-Linux-x86_64-${{ env.TAG }}
           path: dist
           retention-days: 30
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-macos, build-windows, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Zip each platform build
+        run: |
+          cd artifacts
+          for d in */; do
+            name="${d%/}"
+            zip -r "../${name}.zip" "$d"
+          done
+          cd ..
+          ls -lh *.zip
+
+      - name: Determine if pre-release
+        id: prerelease
+        run: |
+          if [[ "$TAG" == *-* ]]; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release with platform zips
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          prerelease: ${{ steps.prerelease.outputs.value == 'true' }}
+          generate_release_notes: false
+          files: "*.zip"
