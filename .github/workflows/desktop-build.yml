@@ -150,6 +150,12 @@ jobs:
         with:
           path: artifacts/
 
+      - name: Restore execute bits on macOS binaries
+        # actions/download-artifact strips Unix permissions; macOS .app
+        # executables must be +x or Finder reports "can't be opened".
+        run: |
+          find artifacts -path "*/Argus.app/Contents/MacOS/Argus" -exec chmod +x {} \;
+
       - name: Zip each platform build
         run: |
           cd artifacts
