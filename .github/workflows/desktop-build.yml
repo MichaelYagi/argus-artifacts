@@ -138,46 +138,9 @@ jobs:
           path: dist
           retention-days: 30
 
-  build-linux:
-    name: Linux (x86_64)
-    needs: backend-tests
-    # x86_64 only -- the resulting binary is tied to this runner's glibc version.
-    # No tray on Linux: pystray has no single reliable tray protocol across
-    # desktop environments. This build is a plain CLI binary (same as ./argus
-    # from source, but self-contained).
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: MichaelYagi/argus
-          ref: ${{ env.TAG }}
-          token: ${{ secrets.PUBLIC_REPO_READ_TOKEN || github.token }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Set up .venv
-        # No tray_requirements.txt here -- pystray/Pillow are never bundled
-        # in the Linux build (see packaging/argus-linux.spec's own header).
-        run: |
-          python3 -m venv .venv
-          .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install -r requirements.txt
-      - name: Build argus
-        run: packaging/build-linux.sh
-      - name: Add README, LICENSE and third-party notices
-        run: |
-          { echo "Argus $TAG -- Linux (x86_64)"; echo; cat packaging/README-linux-artifact.txt; } > dist/README.txt
-          cp LICENSE dist/LICENSE.txt
-          .venv/bin/python packaging/gen_third_party_notices.py dist/THIRD-PARTY-NOTICES.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Argus-Linux-x86_64-${{ env.TAG }}
-          path: dist
-          retention-days: 30
-
   publish-release:
     name: Publish GitHub Release
-    needs: [build-macos, build-windows, build-linux]
+    needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
